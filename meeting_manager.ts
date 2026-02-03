@@ -3,12 +3,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const CONFIG = {
-  JITSI_URL: 'https://meet.javiergonzalez.io',
+  JITSI_URL: 'https://meet.javiergonzalez.io/leon-living-room',
   DISPLAY_NAME: 'leon living room',
+  CHROMECAST_DEVICE_NAME: 'Living Room TV', // Set your Chromecast device name here (e.g., 'Living Room TV')
   CHROMECAST_RETRIES: 4,
   CHROMECAST_RETRY_DELAY_MS: 5000,
   JITSI_TIMEOUT_MS: 30000,
   SCREENSHOT_DIR: './screenshots',
+  DEBUG: process.env.DEBUG === 'true' || process.env.DEBUG === '1',
 };
 
 let browser: Browser | null = null;
@@ -21,6 +23,9 @@ async function ensureScreenshotDir(): Promise<void> {
 }
 
 async function takeScreenshot(page: Page, name: string): Promise<void> {
+  if (!CONFIG.DEBUG) {
+    return;
+  }
   await ensureScreenshotDir();
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const screenshotPath = path.join(CONFIG.SCREENSHOT_DIR, `${name}_${timestamp}.png`);
@@ -40,85 +45,82 @@ async function cleanup(): Promise<void> {
 }
 
 async function castToChromecast(page: Page): Promise<boolean> {
-  console.log('📺 Attempting to cast to Chromecast...');
+  console.log('📺 Attempting to cast to Chromecast via CDP...');
   
-  for (let attempt = 1; attempt <= CONFIG.CHROMECAST_RETRIES; attempt++) {
-    console.log(`  Attempt ${attempt}/${CONFIG.CHROMECAST_RETRIES}`);
+  try {
+    // Get CDP session from the page
+    const cdpSession = await page.context().newCDPSession(page);
     
-    try {
-      const castButtonSelectors = [
-        '[aria-label*="cast" i]',
-        '[aria-label*="Cast" i]',
-        '[title*="cast" i]',
-        '[title*="Cast" i]',
-        'button:has-text("cast")',
-        'button:has-text("Cast")',
-        '[data-testid*="cast" i]',
-        '.cast-button',
-        '[class*="cast" i]',
-      ];
-      
-      for (const selector of castButtonSelectors) {
-        const button = await page.$(selector);
-        if (button) {
-          console.log(`    Found cast button: ${selector}`);
-          await button.click();
-          console.log('    Clicked cast button');
-          
-          await page.waitForTimeout(2000);
-          
-          const deviceSelectors = [
-            '[role="dialog"] button',
-            '.cast-device',
-            '[class*="device" i]',
-            'text=/Chromecast|TV|Screen/i',
-          ];
-          
-          for (const deviceSelector of deviceSelectors) {
-            const device = await page.$(deviceSelector);
-            if (device) {
-              console.log(`    Found device: ${deviceSelector}`);
-              await device.click();
-              console.log('    ✅ Casting started!');
-              await takeScreenshot(page, 'casting_started');
-              await page.waitForTimeout(3000);
-              return true;
-            }
-          }
-        }
-      }
-      
-      console.log('    No cast button found, trying keyboard shortcut...');
-      await page.keyboard.press('Control+Shift+S');
-      await page.waitForTimeout(2000);
-      
-      const dialogSelectors = [
-        '[role="dialog"]',
-        '.cast-dialog',
-        '[class*="cast" i]',
-      ];
-      
-      for (const dialogSelector of dialogSelectors) {
-        const dialog = await page.$(dialogSelector);
-        if (dialog) {
-          const firstDevice = await dialog.$('button, [role="button"], .device');
-            if (firstDevice) {
-            await firstDevice.click();
-            console.log('    ✅ Casting started via keyboard shortcut!');
-            await takeScreenshot(page, 'casting_started_keyboard');
-            return true;
-          }
-        }
-      }
-      
-    } catch (error) {
-      console.log(`    Attempt ${attempt} failed: ${error}`);
-    }
+    // Enable the Cast domain
+    await cdpSession.send('Cast.enable');
+    console.log('  ✅ Cast domain enabled');
     
-    if (attempt < CONFIG.CHROMECAST_RETRIES) {
-      console.log(`    Waiting ${CONFIG.CHROMECAST_RETRY_DELAY_MS}ms before retry...`);
+    // Set up listener for available sinks (Cast devices)
+    const sinks: Array<{ name: string; id: string; session?: string }> = [];
+    
+    cdpSession.on('Cast.sinksUpdated', (event: { sinks: Array<{ name: string; id: string; session?: string }> }) => {
+      console.log(`  📡 Found ${event.sinks.length} Cast device(s):`);
+      event.sinks.forEach((sink, i) => {
+        console.log(`    ${i + 1}. ${sink.name} (${sink.id})`);
+        sinks.push(sink);
+      });
+    });
+    
+    cdpSession.on('Cast.issueUpdated', (event: { issueMessage: string }) => {
+      console.log(`  ⚠️ Cast issue: ${event.issueMessage}`);
+    });
+    
+    // Wait for devices to be discovered
+    for (let attempt = 1; attempt <= CONFIG.CHROMECAST_RETRIES; attempt++) {
+      console.log(`  Attempt ${attempt}/${CONFIG.CHROMECAST_RETRIES} - waiting for devices...`);
+      
       await page.waitForTimeout(CONFIG.CHROMECAST_RETRY_DELAY_MS);
+      
+      if (sinks.length > 0) {
+        let targetSink = sinks[0]; // Default to first device
+        
+        // If a specific device name is configured, try to find it
+        if (CONFIG.CHROMECAST_DEVICE_NAME) {
+          const namedSink = sinks.find(s => 
+            s.name.toLowerCase().includes(CONFIG.CHROMECAST_DEVICE_NAME.toLowerCase())
+          );
+          if (namedSink) {
+            targetSink = namedSink;
+            console.log(`  🎯 Found configured device: ${targetSink.name}`);
+          } else {
+            console.log(`  ⚠️ Configured device "${CONFIG.CHROMECAST_DEVICE_NAME}" not found, using first available`);
+          }
+        }
+        
+        console.log(`  📺 Starting cast to: ${targetSink.name}`);
+        
+        try {
+          // Start tab mirroring to the selected sink
+          await cdpSession.send('Cast.startDesktopMirroring', { sinkName: targetSink.name });
+          console.log('  ✅ Cast started successfully!');
+          await takeScreenshot(page, 'casting_started');
+          return true;
+        } catch (castError) {
+          console.log(`  ⚠️ startDesktopMirroring failed, trying startTabMirroring...`);
+          try {
+            await cdpSession.send('Cast.startTabMirroring', { sinkName: targetSink.name });
+            console.log('  ✅ Tab mirroring started successfully!');
+            await takeScreenshot(page, 'tab_mirroring_started');
+            return true;
+          } catch (tabError) {
+            console.log(`  ❌ Tab mirroring also failed: ${tabError}`);
+          }
+        }
+      } else {
+        console.log('  No Cast devices found yet...');
+      }
     }
+    
+    // Clean up
+    await cdpSession.send('Cast.disable');
+    
+  } catch (error) {
+    console.log(`  ❌ CDP Cast error: ${error}`);
   }
   
   console.log('  ❌ All casting attempts failed, continuing without casting');
@@ -131,7 +133,20 @@ async function joinMeeting(page: Page): Promise<boolean> {
   try {
     console.log('  Waiting for pre-join screen...');
     await page.waitForLoadState('networkidle');
+    
+    try {
+      await page.waitForSelector('input[type="text"], button[aria-label*="join" i], button:has-text("Join")', { timeout: 10000 });
+      console.log('  ✅ Pre-join screen elements detected');
+    } catch (e) {
+      console.log('  ⚠️ Pre-join screen elements not found, continuing anyway...');
+    }
+    
     await page.waitForTimeout(3000);
+    
+    await takeScreenshot(page, 'prejoin_screen');
+    const bodyHTML = await page.content();
+    console.log('  Page title:', await page.title());
+    console.log('  Current URL:', page.url());
     
     const nameSelectors = [
       'input[placeholder*="name" i]',
@@ -164,19 +179,19 @@ async function joinMeeting(page: Page): Promise<boolean> {
     }
     
     const joinSelectors = [
-      'button:has-text("join")',
-      'button:has-text("Join")',
-      'button:has-text("join meeting")',
-      'button:has-text("Join Meeting")',
+      '[data-testid="prejoin.joinMeeting"]',
       'button[aria-label*="join" i]',
-      'button[aria-label*="Join" i]',
+      'button:has-text("Join")',
+      'button:has-text("join")',
+      'button:has-text("Join meeting")',
+      'button:has-text("join meeting")',
+      '[aria-label*="Join meeting" i]',
       '[data-testid*="join" i]',
       '#joinButton',
       '.join-button',
+      'div[role="button"][aria-label*="join" i]',
+      'div[role="button"]:has-text("Join")',
       'button[type="submit"]',
-      '[role="button"]:has-text("Join")',
-      '[role="button"][aria-label*="Join meeting" i]',
-      '[data-testid="prejoin.joinMeeting"]',
     ];
     
     let joinButton = null;
@@ -195,6 +210,20 @@ async function joinMeeting(page: Page): Promise<boolean> {
     if (!joinButton) {
       console.log('  ❌ Join button not found');
       await takeScreenshot(page, 'join_button_not_found');
+      
+      console.log('  🔍 Debugging: Looking for all buttons on page...');
+      const allButtons = await page.$$('button');
+      console.log(`  Found ${allButtons.length} button elements`);
+      
+      for (let i = 0; i < Math.min(allButtons.length, 10); i++) {
+        const btn = allButtons[i];
+        const text = await btn.textContent();
+        const ariaLabel = await btn.getAttribute('aria-label');
+        const dataTestId = await btn.getAttribute('data-testid');
+        const isVisible = await btn.isVisible();
+        console.log(`    Button ${i}: text="${text?.trim()}" aria-label="${ariaLabel}" data-testid="${dataTestId}" visible=${isVisible}`);
+      }
+      
       return false;
     }
     
@@ -269,10 +298,12 @@ async function main(): Promise<void> {
     browser = await chromium.launch({
       headless: false,
       args: [
-        '--enable-features=MediaRouter',
+        '--enable-features=MediaRouter,GlobalMediaControls',
+        '--load-media-router-component-extension=1',
         '--enable-usermedia-screen-capturing',
         '--no-sandbox',
         '--disable-setuid-sandbox',
+        '--auto-select-desktop-capture-source=Entire screen',
       ],
     });
     
