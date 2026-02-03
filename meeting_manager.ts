@@ -261,6 +261,67 @@ async function joinMeeting(page: Page): Promise<boolean> {
       console.log('  ⚠️ Meeting may not have fully loaded, but continuing...');
     }
     
+    // Ensure audio is unmuted and playing
+    console.log('  🔊 Checking audio settings...');
+    await page.waitForTimeout(2000);
+    
+    // Ensure all audio elements are unmuted and playing
+    await page.evaluate(() => {
+      const audioElements = document.querySelectorAll('audio');
+      const videoElements = document.querySelectorAll('video');
+      
+      console.log(`Found ${audioElements.length} audio elements and ${videoElements.length} video elements`);
+      
+      audioElements.forEach((audio, index) => {
+        audio.muted = false;
+        audio.volume = 1.0;
+        if (audio.paused) {
+          audio.play().catch(err => console.log(`Failed to play audio ${index}:`, err));
+        }
+        console.log(`Audio ${index}: muted=${audio.muted}, volume=${audio.volume}, paused=${audio.paused}`);
+      });
+      
+      videoElements.forEach((video, index) => {
+        video.muted = false;
+        video.volume = 1.0;
+        if (video.paused) {
+          video.play().catch(err => console.log(`Failed to play video ${index}:`, err));
+        }
+        console.log(`Video ${index}: muted=${video.muted}, volume=${video.volume}, paused=${video.paused}`);
+      });
+    });
+    
+    // Try to find and click the mute button to unmute if needed
+    const muteButtonSelectors = [
+      '[aria-label*="mute" i][aria-label*="audio" i]',
+      '[aria-label*="Unmute" i]',
+      '[data-testid*="audio" i]',
+      'button[aria-label*="microphone" i]',
+      '.audio-button',
+      '[class*="audio" i][class*="button" i]',
+    ];
+    
+    for (const selector of muteButtonSelectors) {
+      try {
+        const muteBtn = await page.$(selector);
+        if (muteBtn) {
+          const ariaLabel = await muteBtn.getAttribute('aria-label');
+          console.log(`  Found audio control: ${ariaLabel}`);
+          // Check if it says "Unmute" which means we're muted
+          if (ariaLabel && ariaLabel.toLowerCase().includes('unmute')) {
+            await muteBtn.click();
+            console.log('  ✅ Clicked unmute button');
+            await page.waitForTimeout(1000);
+          }
+          break;
+        }
+      } catch (e) {
+        // Continue to next selector
+      }
+    }
+    
+    await takeScreenshot(page, 'audio_checked');
+    
     return true;
     
   } catch (error) {
@@ -305,10 +366,9 @@ async function main(): Promise<void> {
       '--disable-setuid-sandbox',
       '--auto-select-desktop-capture-source=Entire screen',
       '--use-fake-ui-for-media-stream',
-      '--use-fake-device-for-media-stream',
       '--disable-features=IsolateOrigins,site-per-process',
-      '--disable-web-security',
       '--autoplay-policy=no-user-gesture-required',
+      '--disable-blink-features=AutomationControlled',
     ];
 
     const launchOptions: any = {
@@ -335,12 +395,42 @@ async function main(): Promise<void> {
     context = await browser.newContext({
       permissions: ['camera', 'microphone'],
       viewport: { width: 1280, height: 720 },
+      // Ensure audio is enabled
+      acceptDownloads: false,
+      bypassCSP: true,
     });
     
     console.log('  ✅ Context created with camera/microphone permissions');
     
     const page = await context.newPage();
     await takeScreenshot(page, 'context_created');
+    
+    // Grant microphone and camera permissions via CDP
+    const cdpSession = await context.newCDPSession(page);
+    await cdpSession.send('Browser.grantPermissions', {
+      origin: CONFIG.JITSI_URL,
+      permissions: ['audioCapture', 'videoCapture', 'displayCapture']
+    });
+    
+    // Inject script to ensure audio autoplay is enabled
+    await page.addInitScript(() => {
+      // Override getUserMedia to ensure audio is captured
+      const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      navigator.mediaDevices.getUserMedia = async (constraints) => {
+        console.log('getUserMedia called with constraints:', constraints);
+        return originalGetUserMedia(constraints);
+      };
+      
+      // Ensure HTMLMediaElement can autoplay
+      Object.defineProperty(HTMLMediaElement.prototype, 'muted', {
+        get() {
+          return false;
+        },
+        set(value) {
+          // Prevent muting
+        }
+      });
+    });
     
     page.on('console', (msg) => {
       if (msg.type() === 'error') {
