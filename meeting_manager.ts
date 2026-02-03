@@ -174,6 +174,9 @@ async function joinMeeting(page: Page): Promise<boolean> {
       '#joinButton',
       '.join-button',
       'button[type="submit"]',
+      '[role="button"]:has-text("Join")',
+      '[role="button"][aria-label*="Join meeting" i]',
+      '[data-testid="prejoin.joinMeeting"]',
     ];
     
     let joinButton = null;
