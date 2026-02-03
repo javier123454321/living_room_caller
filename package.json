@@ -1,0 +1,21 @@
+{
+  "name": "jitsi-meeting-manager",
+  "version": "1.0.0",
+  "description": "Automated Jitsi meeting joiner with Chromecast support",
+  "main": "meeting_manager.ts",
+  "scripts": {
+    "start": "ts-node meeting_manager.ts",
+    "start:headless": "xvfb-run -a --server-args='-screen 0 1280x720x24' ts-node meeting_manager.ts",
+    "build": "tsc meeting_manager.ts",
+    "meeting": "npm run start:headless",
+    "meeting:gui": "npm start"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0"
+  }
+}
