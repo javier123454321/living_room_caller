@@ -11,6 +11,8 @@ const CONFIG = {
   JITSI_TIMEOUT_MS: 30000,
   SCREENSHOT_DIR: './screenshots',
   DEBUG: process.env.DEBUG === 'true' || process.env.DEBUG === '1',
+  CHROME_EXECUTABLE_PATH: process.env.CHROME_EXECUTABLE_PATH || '',
+  CHROME_CHANNEL: process.env.CHROME_CHANNEL || '',
 };
 
 let browser: Browser | null = null;
@@ -295,17 +297,38 @@ async function main(): Promise<void> {
   
   try {
     console.log('🌐 Launching Chrome browser...');
-    browser = await chromium.launch({
+    const launchArgs = [
+      '--enable-features=MediaRouter,GlobalMediaControls,CastMediaRouteProvider',
+      '--load-media-router-component-extension=1',
+      '--enable-usermedia-screen-capturing',
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--auto-select-desktop-capture-source=Entire screen',
+      '--use-fake-ui-for-media-stream',
+      '--use-fake-device-for-media-stream',
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--disable-web-security',
+      '--autoplay-policy=no-user-gesture-required',
+    ];
+
+    const launchOptions: any = {
       headless: false,
-      args: [
-        '--enable-features=MediaRouter,GlobalMediaControls',
-        '--load-media-router-component-extension=1',
-        '--enable-usermedia-screen-capturing',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--auto-select-desktop-capture-source=Entire screen',
-      ],
-    });
+      args: launchArgs,
+    };
+
+    if (CONFIG.CHROME_EXECUTABLE_PATH) {
+      if (!fs.existsSync(CONFIG.CHROME_EXECUTABLE_PATH)) {
+        console.log(`  ⚠️ Chrome executable not found at ${CONFIG.CHROME_EXECUTABLE_PATH}`);
+      } else {
+        launchOptions.executablePath = CONFIG.CHROME_EXECUTABLE_PATH;
+        console.log(`  🔧 Using Chrome executable: ${CONFIG.CHROME_EXECUTABLE_PATH}`);
+      }
+    } else if (CONFIG.CHROME_CHANNEL) {
+      launchOptions.channel = CONFIG.CHROME_CHANNEL;
+      console.log(`  🔧 Using Chrome channel: ${CONFIG.CHROME_CHANNEL}`);
+    }
+
+    browser = await chromium.launch(launchOptions);
     
     console.log('  ✅ Browser launched in headed mode');
     
